@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from discord import app_commands
+import asyncpg
 
 # === CONFIGURATION ===
 # Set your vouch channel ID and points per picture.
@@ -23,28 +24,115 @@ intents.message_content = True  # Also enable Message Content Intent in the Dev 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# === DATA STORAGE ===
+"""
+Storage layer: Postgres on Railway, JSON locally.
+"""
+
 DATA_PATH = Path(__file__).with_name("vouches.json")
 
-def _load_data() -> dict:
-    if DATA_PATH.exists():
-        try:
-            return json.loads(DATA_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
 
-vouches: dict[str, int] = _load_data()
+class JsonStorage:
+    def __init__(self, data_path: Path) -> None:
+        self.data_path = data_path
+        self._data: dict[str, int] = {}
 
-def save_data() -> None:
-    """Persist vouch data to a JSON file next to the script."""
-    DATA_PATH.write_text(json.dumps(vouches, indent=4, ensure_ascii=False), encoding="utf-8")
+    async def init(self) -> None:
+        if self.data_path.exists():
+            try:
+                self._data = json.loads(self.data_path.read_text(encoding="utf-8"))
+            except Exception:
+                self._data = {}
+        else:
+            self._data = {}
+
+    async def get_points(self, user_id: int) -> int:
+        return int(self._data.get(str(user_id), 0))
+
+    async def add_points(self, user_id: int, delta: int) -> int:
+        current = int(self._data.get(str(user_id), 0))
+        new_total = current + int(delta)
+        if new_total < 0:
+            new_total = 0
+        self._data[str(user_id)] = new_total
+        self.data_path.write_text(
+            json.dumps(self._data, indent=4, ensure_ascii=False), encoding="utf-8"
+        )
+        return new_total
+
+    async def top(self, limit: int = 10) -> list[tuple[int, int]]:
+        items = sorted(self._data.items(), key=lambda item: item[1], reverse=True)[:limit]
+        return [(int(uid), int(points)) for uid, points in items]
+
+
+class PostgresStorage:
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+        self.pool: asyncpg.pool.Pool | None = None
+
+    async def init(self) -> None:
+        # Railway often provides DATABASE_URL; SSL may be required. Using default SSL context when available.
+        self.pool = await asyncpg.create_pool(self.database_url)
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                create table if not exists vouches (
+                    user_id bigint primary key,
+                    points integer not null default 0
+                );
+                """
+            )
+
+    async def get_points(self, user_id: int) -> int:
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "select points from vouches where user_id = $1", int(user_id)
+            )
+            return int(row["points"]) if row else 0
+
+    async def add_points(self, user_id: int, delta: int) -> int:
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                insert into vouches as v(user_id, points)
+                values($1, 0)
+                on conflict (user_id)
+                do update set points = greatest(0, v.points + $2)
+                returning points
+                """,
+                int(user_id), int(delta)
+            )
+            return int(row["points"]) if row else 0
+
+    async def top(self, limit: int = 10) -> list[tuple[int, int]]:
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "select user_id, points from vouches order by points desc limit $1",
+                int(limit),
+            )
+        return [(int(r["user_id"]), int(r["points"])) for r in rows]
+
+
+# Choose storage based on environment (DATABASE_URL => Postgres, else JSON)
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL")
+storage: PostgresStorage | JsonStorage
+if DATABASE_URL:
+    storage = PostgresStorage(DATABASE_URL)
+else:
+    storage = JsonStorage(DATA_PATH)
 
 
 # === EVENTS ===
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    # ensure storage is initialized
+    try:
+        await storage.init()
+    except Exception as e:
+        print(f"Storage init failed: {e}")
     # Sync application (slash) commands
     try:
         synced = await bot.tree.sync()
@@ -67,10 +155,10 @@ async def on_message(message: discord.Message):
         ]
 
         if image_attachments:
-            user_id = str(message.author.id)
-            current_points = vouches.get(user_id, 0)
-            vouches[user_id] = current_points + POINTS_PER_PICTURE * len(image_attachments)
-            save_data()
+            try:
+                await storage.add_points(int(message.author.id), POINTS_PER_PICTURE * len(image_attachments))
+            except Exception as e:
+                print(f"Failed to save vouch points: {e}")
             try:
                 await message.add_reaction("✅")
             except Exception:
@@ -84,21 +172,14 @@ async def on_message(message: discord.Message):
 async def vouches_cmd(ctx: commands.Context, member: discord.Member | None = None):
     """Check your or someone else's vouch points."""
     member = member or ctx.author
-    user_id = str(member.id)
-    points = vouches.get(user_id, 0)
+    points = await storage.get_points(int(member.id))
     await ctx.send(f"⭐ {member.display_name} has {points} vouch point(s)!")
 
 
 @bot.command()
 async def topvouches(ctx: commands.Context):
     """Show the top 10 users with the most vouches."""
-    if not vouches:
-        await ctx.send("📉 No vouches recorded yet.")
-        return
-
-    # Sort by total points
-    sorted_vouches = sorted(vouches.items(), key=lambda item: item[1], reverse=True)
-    top_list = sorted_vouches[:10]
+    top_list = await storage.top(10)
 
     embed = discord.Embed(
         title="🏆 Top Vouch Leaderboard",
@@ -137,10 +218,8 @@ async def addvouch(ctx: commands.Context, member: discord.Member, amount: int = 
     if amount < 1:
         await ctx.send("Amount must be at least 1.")
         return
-    user_id = str(member.id)
-    vouches[user_id] = vouches.get(user_id, 0) + amount
-    save_data()
-    await ctx.send(f"✅ Added {amount} to {member.display_name}. Total: {vouches[user_id]}")
+    new_total = await storage.add_points(int(member.id), amount)
+    await ctx.send(f"✅ Added {amount} to {member.display_name}. Total: {new_total}")
 
 
 @bot.command()
@@ -150,11 +229,7 @@ async def removevouch(ctx: commands.Context, member: discord.Member, amount: int
     if amount < 1:
         await ctx.send("Amount must be at least 1.")
         return
-    user_id = str(member.id)
-    current = vouches.get(user_id, 0)
-    new_total = max(0, current - amount)
-    vouches[user_id] = new_total
-    save_data()
+    new_total = await storage.add_points(int(member.id), -amount)
     await ctx.send(f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}")
 
 
@@ -162,8 +237,7 @@ async def removevouch(ctx: commands.Context, member: discord.Member, amount: int
 @bot.tree.command(name="vouches", description="Check your or someone else's vouch points.")
 async def slash_vouches(interaction: discord.Interaction, member: discord.Member | None = None):
     member = member or interaction.user  # type: ignore[assignment]
-    user_id = str(member.id)
-    points = vouches.get(user_id, 0)
+    points = await storage.get_points(int(member.id))
     await interaction.response.send_message(
         f"⭐ {member.display_name} has {points} vouch point(s)!"
     )
@@ -171,16 +245,7 @@ async def slash_vouches(interaction: discord.Interaction, member: discord.Member
 
 @bot.tree.command(name="topvouches", description="Show the top 10 users with the most vouches.")
 async def slash_topvouches(interaction: discord.Interaction):
-    if not vouches:
-        await interaction.response.send_message("📉 No vouches recorded yet.")
-        return
-
-    if interaction.guild is None:
-        await interaction.response.send_message("Use this command in a server.")
-        return
-
-    sorted_vouches = sorted(vouches.items(), key=lambda item: item[1], reverse=True)
-    top_list = sorted_vouches[:10]
+    top_list = await storage.top(10)
 
     embed = discord.Embed(
         title="🏆 Top Vouch Leaderboard",
@@ -216,11 +281,9 @@ async def slash_addvouch(interaction: discord.Interaction, member: discord.Membe
     if amount < 1:
         await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
         return
-    user_id = str(member.id)
-    vouches[user_id] = vouches.get(user_id, 0) + amount
-    save_data()
+    new_total = await storage.add_points(int(member.id), amount)
     await interaction.response.send_message(
-        f"✅ Added {amount} to {member.display_name}. Total: {vouches[user_id]}"
+        f"✅ Added {amount} to {member.display_name}. Total: {new_total}"
     )
 
 
@@ -231,11 +294,7 @@ async def slash_removevouch(interaction: discord.Interaction, member: discord.Me
     if amount < 1:
         await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
         return
-    user_id = str(member.id)
-    current = vouches.get(user_id, 0)
-    new_total = max(0, current - amount)
-    vouches[user_id] = new_total
-    save_data()
+    new_total = await storage.add_points(int(member.id), -amount)
     await interaction.response.send_message(
         f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}"
     )
