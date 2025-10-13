@@ -164,9 +164,19 @@ async def on_message(message: discord.Message):
 
         if image_attachments and has_provider_tag:
             try:
-                await storage.add_points(
+                new_total = await storage.add_points(
                     int(message.author.id), POINTS_PER_PICTURE * len(image_attachments)
                 )
+                try:
+                    await message.add_reaction("✅")
+                except Exception:
+                    pass
+                try:
+                    await message.reply(
+                        f"⭐ {message.author.mention} now has {new_total} vouch point(s)!"
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 print(f"Failed to save vouch points: {e}")
             try:
