@@ -11,6 +11,7 @@ import asyncpg
 # Set your vouch channel ID and points per picture.
 VOUCH_CHANNEL_ID = 1426271314792157346  # Replace with your vouch channel ID
 POINTS_PER_PICTURE = 1  # Change how many points per picture if you want
+PROVIDER_ROLE_NAME = "Provider"  # Only award points if a tagged member has this role
 
 # Load token from environment variable. Do NOT hardcode tokens in code.
 # Also support a local .env file for development.
@@ -154,9 +155,18 @@ async def on_message(message: discord.Message):
             or a.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
         ]
 
-        if image_attachments:
+        # Require that the message tags at least one member who has the Provider role
+        has_provider_tag = False
+        if message.guild is not None and message.mentions:
+            provider_role = next((r for r in message.guild.roles if r.name == PROVIDER_ROLE_NAME), None)
+            if provider_role is not None:
+                has_provider_tag = any(provider_role in m.roles for m in message.mentions)
+
+        if image_attachments and has_provider_tag:
             try:
-                await storage.add_points(int(message.author.id), POINTS_PER_PICTURE * len(image_attachments))
+                await storage.add_points(
+                    int(message.author.id), POINTS_PER_PICTURE * len(image_attachments)
+                )
             except Exception as e:
                 print(f"Failed to save vouch points: {e}")
             try:
