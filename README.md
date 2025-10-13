@@ -17,7 +17,17 @@ Tracks vouches by counting image attachments in a specific channel and stores to
 pip install -r requirements.txt
 ```
 2. Enable "Message Content Intent" for your bot in the Discord Developer Portal.
-3. Set environment variable for your bot token (never hardcode tokens):
+3. Option A — .env file (recommended for local dev):
+   - Copy `.env.example` to `.env`
+   - Edit `.env` and set your token:
+```env
+DISCORD_TOKEN=YOUR_BOT_TOKEN
+```
+   - Run the bot (it auto-loads `.env`):
+```powershell
+python bot.py
+```
+4. Option B — Environment variable (no file):
    - PowerShell (one-time for the current window):
 ```powershell
 $env:DISCORD_TOKEN="YOUR_BOT_TOKEN"
@@ -26,11 +36,11 @@ $env:DISCORD_TOKEN="YOUR_BOT_TOKEN"
 ```powershell
 setx DISCORD_TOKEN "YOUR_BOT_TOKEN"
 ```
-4. Configure your channel ID inside `bot.py`:
+5. Configure your channel ID inside `bot.py`:
 ```python
 VOUCH_CHANNEL_ID = 123456789012345678
 ```
-5. Run the bot:
+6. Run the bot:
 ```powershell
 python bot.py
 ```

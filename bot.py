@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
 
 # === CONFIGURATION ===
 # Set your vouch channel ID and points per picture.
@@ -10,6 +11,8 @@ VOUCH_CHANNEL_ID = 1426271314792157346  # Replace with your vouch channel ID
 POINTS_PER_PICTURE = 1  # Change how many points per picture if you want
 
 # Load token from environment variable. Do NOT hardcode tokens in code.
+# Also support a local .env file for development.
+load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 
