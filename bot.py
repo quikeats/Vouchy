@@ -130,6 +130,34 @@ async def topvouches(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 
+@bot.command()
+@commands.has_permissions(manage_guild=True)
+async def addvouch(ctx: commands.Context, member: discord.Member, amount: int = 1):
+    """Add vouch points to a member (mods only)."""
+    if amount < 1:
+        await ctx.send("Amount must be at least 1.")
+        return
+    user_id = str(member.id)
+    vouches[user_id] = vouches.get(user_id, 0) + amount
+    save_data()
+    await ctx.send(f"✅ Added {amount} to {member.display_name}. Total: {vouches[user_id]}")
+
+
+@bot.command()
+@commands.has_permissions(manage_guild=True)
+async def removevouch(ctx: commands.Context, member: discord.Member, amount: int = 1):
+    """Remove vouch points from a member (mods only)."""
+    if amount < 1:
+        await ctx.send("Amount must be at least 1.")
+        return
+    user_id = str(member.id)
+    current = vouches.get(user_id, 0)
+    new_total = max(0, current - amount)
+    vouches[user_id] = new_total
+    save_data()
+    await ctx.send(f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}")
+
+
 # === SLASH COMMANDS ===
 @bot.tree.command(name="vouches", description="Check your or someone else's vouch points.")
 async def slash_vouches(interaction: discord.Interaction, member: discord.Member | None = None):
@@ -179,6 +207,38 @@ async def slash_topvouches(interaction: discord.Interaction):
         rank += 1
 
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="addvouch", description="Add vouch points to a member (mods only).")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(member="Member to add points to", amount="How many points to add")
+async def slash_addvouch(interaction: discord.Interaction, member: discord.Member, amount: int = 1):
+    if amount < 1:
+        await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
+        return
+    user_id = str(member.id)
+    vouches[user_id] = vouches.get(user_id, 0) + amount
+    save_data()
+    await interaction.response.send_message(
+        f"✅ Added {amount} to {member.display_name}. Total: {vouches[user_id]}"
+    )
+
+
+@bot.tree.command(name="removevouch", description="Remove vouch points from a member (mods only).")
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(member="Member to remove points from", amount="How many points to remove")
+async def slash_removevouch(interaction: discord.Interaction, member: discord.Member, amount: int = 1):
+    if amount < 1:
+        await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
+        return
+    user_id = str(member.id)
+    current = vouches.get(user_id, 0)
+    new_total = max(0, current - amount)
+    vouches[user_id] = new_total
+    save_data()
+    await interaction.response.send_message(
+        f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}"
+    )
 
 
 # === RUN THE BOT ===
