@@ -4,6 +4,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from discord import app_commands
 
 # === CONFIGURATION ===
 # Set your vouch channel ID and points per picture.
@@ -44,6 +45,12 @@ def save_data() -> None:
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    # Sync application (slash) commands
+    try:
+        synced = await bot.tree.sync()
+        print(f"🔁 Synced {len(synced)} app command(s)")
+    except Exception as e:
+        print(f"App command sync failed: {e}")
 
 
 @bot.event
@@ -121,6 +128,57 @@ async def topvouches(ctx: commands.Context):
         rank += 1
 
     await ctx.send(embed=embed)
+
+
+# === SLASH COMMANDS ===
+@bot.tree.command(name="vouches", description="Check your or someone else's vouch points.")
+async def slash_vouches(interaction: discord.Interaction, member: discord.Member | None = None):
+    member = member or interaction.user  # type: ignore[assignment]
+    user_id = str(member.id)
+    points = vouches.get(user_id, 0)
+    await interaction.response.send_message(
+        f"⭐ {member.display_name} has {points} vouch point(s)!"
+    )
+
+
+@bot.tree.command(name="topvouches", description="Show the top 10 users with the most vouches.")
+async def slash_topvouches(interaction: discord.Interaction):
+    if not vouches:
+        await interaction.response.send_message("📉 No vouches recorded yet.")
+        return
+
+    if interaction.guild is None:
+        await interaction.response.send_message("Use this command in a server.")
+        return
+
+    sorted_vouches = sorted(vouches.items(), key=lambda item: item[1], reverse=True)
+    top_list = sorted_vouches[:10]
+
+    embed = discord.Embed(
+        title="🏆 Top Vouch Leaderboard",
+        description="Here are the top users with the most vouch points!",
+        color=discord.Color.gold(),
+    )
+
+    rank = 1
+    for user_id, points in top_list:
+        display_name = None
+        member = interaction.guild.get_member(int(user_id))
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(int(user_id))
+            except Exception:
+                member = None
+        display_name = member.display_name if member is not None else "(User Left Server)"
+
+        embed.add_field(
+            name=f"#{rank} {display_name}",
+            value=f"⭐ {points} point(s)",
+            inline=False,
+        )
+        rank += 1
+
+    await interaction.response.send_message(embed=embed)
 
 
 # === RUN THE BOT ===
