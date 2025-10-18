@@ -32,6 +32,33 @@ Storage layer: Postgres on Railway, JSON locally.
 DATA_PATH = Path(__file__).with_name("vouches.json")
 
 
+def _load_legacy_json_for_import() -> list[tuple[int, int, int]]:
+    """
+    Load legacy/local JSON vouch data and return list of (user_id, points, total_vouches).
+    Safely handles both old flat int map and new structured format.
+    """
+    if not DATA_PATH.exists():
+        return []
+    try:
+        loaded = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+        rows: list[tuple[int, int, int]] = []
+        if isinstance(loaded, dict):
+            for k, v in loaded.items():
+                try:
+                    uid = int(k)
+                except Exception:
+                    continue
+                if isinstance(v, int):
+                    rows.append((uid, int(v), 0))
+                elif isinstance(v, dict):
+                    points_val = int(v.get("points", v.get("score", 0)))
+                    vouches_val = int(v.get("total_vouches", 0))
+                    rows.append((uid, points_val, vouches_val))
+        return rows
+    except Exception:
+        return []
+
+
 class JsonStorage:
     def __init__(self, data_path: Path) -> None:
         self.data_path = data_path
@@ -189,6 +216,33 @@ class PostgresStorage:
             )
             return (int(row["points"]), int(row["total_vouches"])) if row else (0, 0)
 
+    async def count_rows(self) -> int:
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("select count(*) as c from vouches")
+            return int(row["c"]) if row else 0
+
+    async def bulk_upsert(self, rows: list[tuple[int, int, int]]) -> None:
+        """Upsert a list of (user_id, points, total_vouches)."""
+        if not rows:
+            return
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            # Use a transaction for atomicity
+            async with conn.transaction():
+                for uid, points, vouches in rows:
+                    await conn.execute(
+                        """
+                        insert into vouches(user_id, points, total_vouches)
+                        values($1, $2, $3)
+                        on conflict (user_id)
+                        do update set
+                            points = excluded.points,
+                            total_vouches = excluded.total_vouches
+                        """,
+                        int(uid), int(points), int(vouches)
+                    )
+
     async def top(self, limit: int = 10) -> list[tuple[int, int]]:
         assert self.pool is not None
         async with self.pool.acquire() as conn:
@@ -217,6 +271,17 @@ async def on_ready():
         await storage.init()
     except Exception as e:
         print(f"Storage init failed: {e}")
+    # Auto-import legacy JSON into Postgres if DB is selected and empty
+    try:
+        if isinstance(storage, PostgresStorage):
+            row_count = await storage.count_rows()
+            if row_count == 0:
+                legacy_rows = _load_legacy_json_for_import()
+                if legacy_rows:
+                    await storage.bulk_upsert(legacy_rows)
+                    print(f"📥 Imported {len(legacy_rows)} vouch record(s) from vouches.json into Postgres.")
+    except Exception as e:
+        print(f"Legacy import skipped/failed: {e}")
     # Sync application (slash) commands
     try:
         synced = await bot.tree.sync()
@@ -365,6 +430,27 @@ async def removevouch(ctx: commands.Context, member: discord.Member, amount: int
         await ctx.send(f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}")
 
 
+@bot.command(name="importvouches")
+@commands.has_permissions(administrator=True)
+async def importvouches_cmd(ctx: commands.Context):
+    """Admin: import vouches from local vouches.json into Postgres/JSON storage."""
+    try:
+        if isinstance(storage, PostgresStorage):
+            legacy_rows = _load_legacy_json_for_import()
+            if not legacy_rows:
+                await ctx.send("No local vouches.json data found to import.")
+                return
+            await storage.bulk_upsert(legacy_rows)
+            await ctx.send(f"📥 Imported {len(legacy_rows)} record(s) into Postgres.")
+        elif isinstance(storage, JsonStorage):
+            # JsonStorage already reads/writes the same file; treat as no-op
+            await ctx.send("Running in JSON mode — data already in vouches.json.")
+        else:
+            await ctx.send("Unsupported storage backend for import.")
+    except Exception as e:
+        await ctx.send(f"Import failed: {e}")
+
+
 # === SLASH COMMANDS ===
 @bot.tree.command(name="vouches", description="Check your or someone else's vouch points.")
 async def slash_vouches(interaction: discord.Interaction, member: discord.Member | None = None):
@@ -441,6 +527,25 @@ async def slash_removevouch(interaction: discord.Interaction, member: discord.Me
     else:
         msg = f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}"
     await interaction.response.send_message(msg)
+
+
+@bot.tree.command(name="importvouches", description="Admin: import vouches from local JSON into storage")
+@app_commands.default_permissions(administrator=True)
+async def slash_importvouches(interaction: discord.Interaction):
+    try:
+        if isinstance(storage, PostgresStorage):
+            legacy_rows = _load_legacy_json_for_import()
+            if not legacy_rows:
+                await interaction.response.send_message("No local vouches.json data found to import.", ephemeral=True)
+                return
+            await storage.bulk_upsert(legacy_rows)
+            await interaction.response.send_message(f"📥 Imported {len(legacy_rows)} record(s) into Postgres.", ephemeral=True)
+        elif isinstance(storage, JsonStorage):
+            await interaction.response.send_message("Running in JSON mode — data already in vouches.json.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Unsupported storage backend for import.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Import failed: {e}", ephemeral=True)
 
 
 # === RUN THE BOT ===
