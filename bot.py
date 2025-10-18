@@ -7,6 +7,12 @@ from dotenv import load_dotenv
 from discord import app_commands
 import asyncpg
 from datetime import datetime, timezone
+try:
+    from wcwidth import wcswidth
+except Exception:
+    # Fallback if wcwidth is unavailable; alignment may be imperfect for wide glyphs
+    def wcswidth(s: str) -> int:  # type: ignore[no-redef]
+        return len(s)
 
 # === CONFIGURATION ===
 # Set your vouch channel ID and points per picture.
@@ -58,6 +64,41 @@ def _load_legacy_json_for_import() -> list[tuple[int, int, int]]:
         return rows
     except Exception:
         return []
+
+
+def _string_display_width(text: str) -> int:
+    try:
+        width = wcswidth(text)
+        return width if width >= 0 else len(text)
+    except Exception:
+        return len(text)
+
+
+def _truncate_to_width(text: str, max_width: int) -> str:
+    """Truncate text to a display width, appending an ellipsis if needed."""
+    if _string_display_width(text) <= max_width:
+        return text
+    out_chars: list[str] = []
+    width_so_far = 0
+    for ch in text:
+        ch_w = _string_display_width(ch)
+        if ch_w <= 0:
+            continue
+        if width_so_far + ch_w > max_width - 1:  # reserve 1 for ellipsis
+            break
+        out_chars.append(ch)
+        width_so_far += ch_w
+    return "".join(out_chars) + "…"
+
+
+def _pad_to_width_left(text: str, width: int) -> str:
+    pad = max(0, width - _string_display_width(text))
+    return (" " * pad) + text
+
+
+def _pad_to_width_right(text: str, width: int) -> str:
+    pad = max(0, width - _string_display_width(text))
+    return text + (" " * pad)
 
 
 class JsonStorage:
@@ -394,11 +435,12 @@ async def topvouches(ctx: commands.Context):
 
         # Truncate name for alignment
         name_max = 22
-        name_show = (display_name[: name_max - 1] + "…") if len(display_name) > name_max else display_name
+        name_show = _truncate_to_width(display_name, name_max)
         points_show = f"{int(points):,}"
-        lines.append(f"{rank_str}  {name_show:<22}  {points_show:>8}")
+        line = f"{rank_str}  " + _pad_to_width_right(name_show, name_max) + "  " + _pad_to_width_left(points_show, 8)
+        lines.append(line)
 
-    header = f"RANK  {'USER':<22}  {'POINTS':>8}"
+    header = f"RANK  " + _pad_to_width_right("USER", 22) + "  " + _pad_to_width_left("POINTS", 8)
     desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
 
     embed = discord.Embed(
@@ -507,11 +549,12 @@ async def slash_topvouches(interaction: discord.Interaction):
         display_name = member.display_name if member is not None else "(User Left Server)"
 
         name_max = 22
-        name_show = (display_name[: name_max - 1] + "…") if len(display_name) > name_max else display_name
+        name_show = _truncate_to_width(display_name, name_max)
         points_show = f"{int(points):,}"
-        lines.append(f"{rank_str}  {name_show:<22}  {points_show:>8}")
+        line = f"{rank_str}  " + _pad_to_width_right(name_show, name_max) + "  " + _pad_to_width_left(points_show, 8)
+        lines.append(line)
 
-    header = f"RANK  {'USER':<22}  {'POINTS':>8}"
+    header = f"RANK  " + _pad_to_width_right("USER", 22) + "  " + _pad_to_width_left("POINTS", 8)
     desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
 
     embed = discord.Embed(
