@@ -35,34 +35,81 @@ DATA_PATH = Path(__file__).with_name("vouches.json")
 class JsonStorage:
     def __init__(self, data_path: Path) -> None:
         self.data_path = data_path
-        self._data: dict[str, int] = {}
+        # Structure: { user_id: {"points": int, "total_vouches": int} }
+        self._data: dict[str, dict[str, int]] = {}
 
     async def init(self) -> None:
         if self.data_path.exists():
             try:
-                self._data = json.loads(self.data_path.read_text(encoding="utf-8"))
+                loaded = json.loads(self.data_path.read_text(encoding="utf-8"))
+                # Migrate from { user_id: points_int } to structured objects
+                if isinstance(loaded, dict):
+                    migrated: dict[str, dict[str, int]] = {}
+                    for k, v in loaded.items():
+                        if isinstance(v, int):
+                            migrated[str(k)] = {"points": int(v), "total_vouches": 0}
+                        elif isinstance(v, dict):
+                            points_val = int(v.get("points", v.get("score", 0)))
+                            vouches_val = int(v.get("total_vouches", 0))
+                            migrated[str(k)] = {"points": points_val, "total_vouches": vouches_val}
+                    self._data = migrated
+                else:
+                    self._data = {}
             except Exception:
                 self._data = {}
         else:
             self._data = {}
 
     async def get_points(self, user_id: int) -> int:
-        return int(self._data.get(str(user_id), 0))
+        entry = self._data.get(str(user_id))
+        if not entry:
+            return 0
+        return int(entry.get("points", 0))
+
+    async def get_stats(self, user_id: int) -> tuple[int, int]:
+        entry = self._data.get(str(user_id))
+        if not entry:
+            return 0, 0
+        return int(entry.get("points", 0)), int(entry.get("total_vouches", 0))
 
     async def add_points(self, user_id: int, delta: int) -> int:
-        current = int(self._data.get(str(user_id), 0))
-        new_total = current + int(delta)
+        uid = str(user_id)
+        entry = self._data.get(uid) or {"points": 0, "total_vouches": 0}
+        new_total = int(entry.get("points", 0)) + int(delta)
         if new_total < 0:
             new_total = 0
-        self._data[str(user_id)] = new_total
+        entry["points"] = new_total
+        self._data[uid] = entry
         self.data_path.write_text(
             json.dumps(self._data, indent=4, ensure_ascii=False), encoding="utf-8"
         )
         return new_total
 
+    async def add_vouch(self, user_id: int, points_delta: int, vouches_delta: int = 1) -> tuple[int, int]:
+        uid = str(user_id)
+        entry = self._data.get(uid) or {"points": 0, "total_vouches": 0}
+        new_points = int(entry.get("points", 0)) + int(points_delta)
+        if new_points < 0:
+            new_points = 0
+        new_vouches = int(entry.get("total_vouches", 0)) + int(vouches_delta)
+        if new_vouches < 0:
+            new_vouches = 0
+        entry["points"] = new_points
+        entry["total_vouches"] = new_vouches
+        self._data[uid] = entry
+        self.data_path.write_text(
+            json.dumps(self._data, indent=4, ensure_ascii=False), encoding="utf-8"
+        )
+        return new_points, new_vouches
+
     async def top(self, limit: int = 10) -> list[tuple[int, int]]:
-        items = sorted(self._data.items(), key=lambda item: item[1], reverse=True)[:limit]
-        return [(int(uid), int(points)) for uid, points in items]
+        # Sort by points descending
+        items = sorted(
+            self._data.items(),
+            key=lambda item: int(item[1].get("points", 0)),
+            reverse=True,
+        )[:limit]
+        return [(int(uid), int(obj.get("points", 0))) for uid, obj in items]
 
 
 class PostgresStorage:
@@ -78,8 +125,16 @@ class PostgresStorage:
                 """
                 create table if not exists vouches (
                     user_id bigint primary key,
-                    points integer not null default 0
+                    points integer not null default 0,
+                    total_vouches integer not null default 0
                 );
+                """
+            )
+            # Ensure column exists for older deployments
+            await conn.execute(
+                """
+                alter table if exists vouches
+                add column if not exists total_vouches integer not null default 0;
                 """
             )
 
@@ -90,6 +145,17 @@ class PostgresStorage:
                 "select points from vouches where user_id = $1", int(user_id)
             )
             return int(row["points"]) if row else 0
+
+    async def get_stats(self, user_id: int) -> tuple[int, int]:
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "select points, total_vouches from vouches where user_id = $1",
+                int(user_id),
+            )
+            if not row:
+                return 0, 0
+            return int(row["points"]), int(row["total_vouches"])
 
     async def add_points(self, user_id: int, delta: int) -> int:
         assert self.pool is not None
@@ -105,6 +171,23 @@ class PostgresStorage:
                 int(user_id), int(delta)
             )
             return int(row["points"]) if row else 0
+
+    async def add_vouch(self, user_id: int, points_delta: int, vouches_delta: int = 1) -> tuple[int, int]:
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                insert into vouches as v(user_id, points, total_vouches)
+                values($1, 0, 0)
+                on conflict (user_id)
+                do update set
+                    points = greatest(0, v.points + $2),
+                    total_vouches = greatest(0, v.total_vouches + $3)
+                returning points, total_vouches
+                """,
+                int(user_id), int(points_delta), int(vouches_delta)
+            )
+            return (int(row["points"]), int(row["total_vouches"])) if row else (0, 0)
 
     async def top(self, limit: int = 10) -> list[tuple[int, int]]:
         assert self.pool is not None
@@ -164,16 +247,27 @@ async def on_message(message: discord.Message):
 
         if image_attachments and has_provider_tag:
             try:
-                new_total = await storage.add_points(
-                    int(message.author.id), POINTS_PER_PICTURE * len(image_attachments)
-                )
+                earned_points = POINTS_PER_PICTURE * len(image_attachments)
+                # Atomically increment points and vouch count
+                if hasattr(storage, "add_vouch"):
+                    new_total, new_vouches = await storage.add_vouch(
+                        int(message.author.id), earned_points, 1
+                    )
+                else:
+                    # Fallback for older storage implementation
+                    new_total = await storage.add_points(int(message.author.id), earned_points)
+                    # Try best-effort to read vouches count if available
+                    if hasattr(storage, "get_stats"):
+                        _points, new_vouches = await storage.get_stats(int(message.author.id))
+                    else:
+                        new_vouches = 0
                 try:
                     await message.add_reaction("✅")
                 except Exception:
                     pass
                 try:
                     await message.reply(
-                        f"⭐ {message.author.mention} now has {new_total} vouch point(s)!"
+                        f"⭐ {message.author.mention} earned {earned_points} point(s). Total: {new_total} point(s). Total vouches: {new_vouches}."
                     )
                 except Exception:
                     pass
@@ -192,8 +286,14 @@ async def on_message(message: discord.Message):
 async def vouches_cmd(ctx: commands.Context, member: discord.Member | None = None):
     """Check your or someone else's vouch points."""
     member = member or ctx.author
-    points = await storage.get_points(int(member.id))
-    await ctx.send(f"⭐ {member.display_name} has {points} vouch point(s)!")
+    if hasattr(storage, "get_stats"):
+        points, total_vouches = await storage.get_stats(int(member.id))
+    else:
+        points = await storage.get_points(int(member.id))
+        total_vouches = 0
+    await ctx.send(
+        f"⭐ {member.display_name} has {points} point(s) • {total_vouches} total vouch(es)."
+    )
 
 
 @bot.command()
@@ -238,8 +338,14 @@ async def addvouch(ctx: commands.Context, member: discord.Member, amount: int = 
     if amount < 1:
         await ctx.send("Amount must be at least 1.")
         return
-    new_total = await storage.add_points(int(member.id), amount)
-    await ctx.send(f"✅ Added {amount} to {member.display_name}. Total: {new_total}")
+    if hasattr(storage, "add_vouch"):
+        new_total, new_vouches = await storage.add_vouch(int(member.id), amount, 1)
+        await ctx.send(
+            f"✅ Added {amount} to {member.display_name}. Total: {new_total} • Vouches: {new_vouches}"
+        )
+    else:
+        new_total = await storage.add_points(int(member.id), amount)
+        await ctx.send(f"✅ Added {amount} to {member.display_name}. Total: {new_total}")
 
 
 @bot.command()
@@ -250,16 +356,26 @@ async def removevouch(ctx: commands.Context, member: discord.Member, amount: int
         await ctx.send("Amount must be at least 1.")
         return
     new_total = await storage.add_points(int(member.id), -amount)
-    await ctx.send(f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}")
+    if hasattr(storage, "get_stats"):
+        _p, vouches = await storage.get_stats(int(member.id))
+        await ctx.send(
+            f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total} • Vouches: {vouches}"
+        )
+    else:
+        await ctx.send(f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}")
 
 
 # === SLASH COMMANDS ===
 @bot.tree.command(name="vouches", description="Check your or someone else's vouch points.")
 async def slash_vouches(interaction: discord.Interaction, member: discord.Member | None = None):
     member = member or interaction.user  # type: ignore[assignment]
-    points = await storage.get_points(int(member.id))
+    if hasattr(storage, "get_stats"):
+        points, total_vouches = await storage.get_stats(int(member.id))
+    else:
+        points = await storage.get_points(int(member.id))
+        total_vouches = 0
     await interaction.response.send_message(
-        f"⭐ {member.display_name} has {points} vouch point(s)!"
+        f"⭐ {member.display_name} has {points} point(s) • {total_vouches} total vouch(es)."
     )
 
 
@@ -301,10 +417,13 @@ async def slash_addvouch(interaction: discord.Interaction, member: discord.Membe
     if amount < 1:
         await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
         return
-    new_total = await storage.add_points(int(member.id), amount)
-    await interaction.response.send_message(
-        f"✅ Added {amount} to {member.display_name}. Total: {new_total}"
-    )
+    if hasattr(storage, "add_vouch"):
+        new_total, new_vouches = await storage.add_vouch(int(member.id), amount, 1)
+        msg = f"✅ Added {amount} to {member.display_name}. Total: {new_total} • Vouches: {new_vouches}"
+    else:
+        new_total = await storage.add_points(int(member.id), amount)
+        msg = f"✅ Added {amount} to {member.display_name}. Total: {new_total}"
+    await interaction.response.send_message(msg)
 
 
 @bot.tree.command(name="removevouch", description="Remove vouch points from a member (mods only).")
@@ -314,10 +433,14 @@ async def slash_removevouch(interaction: discord.Interaction, member: discord.Me
     if amount < 1:
         await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
         return
+    # Removing points should not remove vouch count
     new_total = await storage.add_points(int(member.id), -amount)
-    await interaction.response.send_message(
-        f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}"
-    )
+    if hasattr(storage, "get_stats"):
+        _p, vouches = await storage.get_stats(int(member.id))
+        msg = f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total} • Vouches: {vouches}"
+    else:
+        msg = f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}"
+    await interaction.response.send_message(msg)
 
 
 # === RUN THE BOT ===
