@@ -6,6 +6,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from discord import app_commands
 import asyncpg
+from datetime import datetime, timezone
 
 # === CONFIGURATION ===
 # Set your vouch channel ID and points per picture.
@@ -363,35 +364,52 @@ async def vouches_cmd(ctx: commands.Context, member: discord.Member | None = Non
 
 @bot.command()
 async def topvouches(ctx: commands.Context):
-    """Show the top 10 users with the most vouches."""
-    top_list = await storage.top(10)
+    """Show the top 30 users with the most vouch points."""
+    top_list = await storage.top(30)
+
+    # Build pretty, aligned leaderboard lines
+    lines: list[str] = []
+    for idx, (user_id, points) in enumerate(top_list, start=1):
+        # Medal/rank
+        if idx == 1:
+            rank_str = "🥇"
+        elif idx == 2:
+            rank_str = "🥈"
+        elif idx == 3:
+            rank_str = "🥉"
+        else:
+            rank_str = f"#{idx:>2}"
+
+        # Resolve display name
+        if ctx.guild is not None:
+            member = ctx.guild.get_member(int(user_id))
+            if member is None:
+                try:
+                    member = await ctx.guild.fetch_member(int(user_id))
+                except Exception:
+                    member = None
+            display_name = member.display_name if member is not None else "(User Left Server)"
+        else:
+            display_name = str(user_id)
+
+        # Truncate name for alignment
+        name_max = 22
+        name_show = (display_name[: name_max - 1] + "…") if len(display_name) > name_max else display_name
+        points_show = f"{int(points):,}"
+        lines.append(f"{rank_str}  {name_show:<22}  {points_show:>8}")
+
+    header = f"RANK  {'USER':<22}  {'POINTS':>8}"
+    desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
 
     embed = discord.Embed(
         title="🏆 Top Vouch Leaderboard",
-        description="Here are the top users with the most vouch points!",
+        description=desc,
         color=discord.Color.gold(),
     )
-
-    rank = 1
-    for user_id, points in top_list:
-        display_name = None
-        member = ctx.guild.get_member(int(user_id)) if ctx.guild else None
-        if member is None and ctx.guild is not None:
-            try:
-                member = await ctx.guild.fetch_member(int(user_id))
-            except Exception:
-                member = None
-        if member is not None:
-            display_name = member.display_name
-        else:
-            display_name = "(User Left Server)"
-
-        embed.add_field(
-            name=f"#{rank} {display_name}",
-            value=f"⭐ {points} point(s)",
-            inline=False,
-        )
-        rank += 1
+    if ctx.guild and ctx.guild.icon:
+        embed.set_thumbnail(url=ctx.guild.icon.url)
+    embed.set_footer(text=f"{ctx.guild.name if ctx.guild else 'Vouchy'} • Points leaderboard")
+    embed.timestamp = datetime.now(timezone.utc)
 
     await ctx.send(embed=embed)
 
@@ -465,33 +483,46 @@ async def slash_vouches(interaction: discord.Interaction, member: discord.Member
     )
 
 
-@bot.tree.command(name="topvouches", description="Show the top 10 users with the most vouches.")
+@bot.tree.command(name="topvouches", description="Show the top 30 users with the most vouch points.")
 async def slash_topvouches(interaction: discord.Interaction):
-    top_list = await storage.top(10)
+    top_list = await storage.top(30)
 
-    embed = discord.Embed(
-        title="🏆 Top Vouch Leaderboard",
-        description="Here are the top users with the most vouch points!",
-        color=discord.Color.gold(),
-    )
+    lines: list[str] = []
+    for idx, (user_id, points) in enumerate(top_list, start=1):
+        if idx == 1:
+            rank_str = "🥇"
+        elif idx == 2:
+            rank_str = "🥈"
+        elif idx == 3:
+            rank_str = "🥉"
+        else:
+            rank_str = f"#{idx:>2}"
 
-    rank = 1
-    for user_id, points in top_list:
-        display_name = None
-        member = interaction.guild.get_member(int(user_id))
-        if member is None:
+        member = interaction.guild.get_member(int(user_id)) if interaction.guild else None
+        if member is None and interaction.guild is not None:
             try:
                 member = await interaction.guild.fetch_member(int(user_id))
             except Exception:
                 member = None
         display_name = member.display_name if member is not None else "(User Left Server)"
 
-        embed.add_field(
-            name=f"#{rank} {display_name}",
-            value=f"⭐ {points} point(s)",
-            inline=False,
-        )
-        rank += 1
+        name_max = 22
+        name_show = (display_name[: name_max - 1] + "…") if len(display_name) > name_max else display_name
+        points_show = f"{int(points):,}"
+        lines.append(f"{rank_str}  {name_show:<22}  {points_show:>8}")
+
+    header = f"RANK  {'USER':<22}  {'POINTS':>8}"
+    desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
+
+    embed = discord.Embed(
+        title="🏆 Top Vouch Leaderboard",
+        description=desc,
+        color=discord.Color.gold(),
+    )
+    if interaction.guild and interaction.guild.icon:
+        embed.set_thumbnail(url=interaction.guild.icon.url)
+    embed.set_footer(text=f"{interaction.guild.name if interaction.guild else 'Vouchy'} • Points leaderboard")
+    embed.timestamp = datetime.now(timezone.utc)
 
     await interaction.response.send_message(embed=embed)
 
