@@ -564,47 +564,65 @@ async def slash_vouches(interaction: discord.Interaction, member: discord.Member
 
 @bot.tree.command(name="topvouches", description="Show the top 30 users with the most vouch points.")
 async def slash_topvouches(interaction: discord.Interaction):
-    top_list = await storage.top(30)
+    try:
+        await interaction.response.defer()  # prevent 3s timeout if DB is slow
+    except Exception:
+        # If already responded or cannot defer, continue
+        pass
 
-    lines: list[str] = []
-    for idx, (user_id, points) in enumerate(top_list, start=1):
-        if idx == 1:
-            rank_str = "🥇"
-        elif idx == 2:
-            rank_str = "🥈"
-        elif idx == 3:
-            rank_str = "🥉"
+    try:
+        top_list = await storage.top(30)
+
+        lines: list[str] = []
+        for idx, (user_id, points) in enumerate(top_list, start=1):
+            if idx == 1:
+                rank_str = "🥇"
+            elif idx == 2:
+                rank_str = "🥈"
+            elif idx == 3:
+                rank_str = "🥉"
+            else:
+                rank_str = f"#{idx:>2}"
+
+            member = interaction.guild.get_member(int(user_id)) if interaction.guild else None
+            if member is None and interaction.guild is not None:
+                try:
+                    member = await interaction.guild.fetch_member(int(user_id))
+                except Exception:
+                    member = None
+            display_name = member.display_name if member is not None else "(User Left Server)"
+
+            name_max = 22
+            name_show = _truncate_to_width(display_name, name_max)
+            points_show = f"{int(points):,}"
+            line = f"{rank_str}  " + _pad_to_width_right(name_show, name_max) + "  " + _pad_to_width_left(points_show, 8)
+            lines.append(line)
+
+        header = f"RANK  " + _pad_to_width_right("USER", 22) + "  " + _pad_to_width_left("POINTS", 8)
+        desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
+
+        embed = discord.Embed(
+            title="🏆 Top Vouch Leaderboard",
+            description=desc,
+            color=discord.Color.gold(),
+        )
+        if interaction.guild and interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+        embed.set_footer(text=f"{interaction.guild.name if interaction.guild else 'Vouchy'} • Points leaderboard")
+        embed.timestamp = datetime.now(timezone.utc)
+
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed)
         else:
-            rank_str = f"#{idx:>2}"
-
-        member = interaction.guild.get_member(int(user_id)) if interaction.guild else None
-        if member is None and interaction.guild is not None:
-            try:
-                member = await interaction.guild.fetch_member(int(user_id))
-            except Exception:
-                member = None
-        display_name = member.display_name if member is not None else "(User Left Server)"
-
-        name_max = 22
-        name_show = _truncate_to_width(display_name, name_max)
-        points_show = f"{int(points):,}"
-        line = f"{rank_str}  " + _pad_to_width_right(name_show, name_max) + "  " + _pad_to_width_left(points_show, 8)
-        lines.append(line)
-
-    header = f"RANK  " + _pad_to_width_right("USER", 22) + "  " + _pad_to_width_left("POINTS", 8)
-    desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
-
-    embed = discord.Embed(
-        title="🏆 Top Vouch Leaderboard",
-        description=desc,
-        color=discord.Color.gold(),
-    )
-    if interaction.guild and interaction.guild.icon:
-        embed.set_thumbnail(url=interaction.guild.icon.url)
-    embed.set_footer(text=f"{interaction.guild.name if interaction.guild else 'Vouchy'} • Points leaderboard")
-    embed.timestamp = datetime.now(timezone.utc)
-
-    await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"Failed to generate leaderboard: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Failed to generate leaderboard: {e}", ephemeral=True)
+        except Exception:
+            pass
 
 
 @bot.tree.command(name="addvouch", description="Add vouch points to a member (mods only).")
