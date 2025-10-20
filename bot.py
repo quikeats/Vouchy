@@ -677,6 +677,70 @@ async def slash_importvouches(interaction: discord.Interaction):
         await interaction.response.send_message(f"Import failed: {e}", ephemeral=True)
 
 
+# Upload-based restore for convenience in hosted environments
+@bot.tree.command(name="restorevouches", description="Admin: restore vouches from an uploaded JSON file")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(file="JSON mapping of user IDs to points or objects with points/total_vouches")
+async def slash_restorevouches(interaction: discord.Interaction, file: discord.Attachment):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+    try:
+        # Read and parse uploaded JSON
+        raw = await file.read()
+        loaded = json.loads(raw.decode("utf-8"))
+
+        # Accept both { user_id: points } and { user_id: { points, total_vouches } }
+        rows: list[tuple[int, int, int]] = []
+        if isinstance(loaded, dict):
+            for k, v in loaded.items():
+                try:
+                    uid = int(k)
+                except Exception:
+                    continue
+                if isinstance(v, int):
+                    rows.append((uid, int(v), 0))
+                elif isinstance(v, dict):
+                    points_val = int(v.get("points", v.get("score", 0)))
+                    vouches_val = int(v.get("total_vouches", 0))
+                    rows.append((uid, points_val, vouches_val))
+
+        if not rows:
+            msg = "No valid records found in uploaded JSON. Ensure it maps user IDs to points."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        # Upsert into storage
+        if isinstance(storage, PostgresStorage):
+            await storage.bulk_upsert(rows)
+        elif isinstance(storage, JsonStorage):
+            # Overwrite JSON storage with provided rows
+            for uid, points, vouches in rows:
+                storage._data[str(uid)] = {"points": int(points), "total_vouches": int(vouches)}
+            storage.data_path.write_text(
+                json.dumps(storage._data, indent=4, ensure_ascii=False), encoding="utf-8"
+            )
+        else:
+            raise RuntimeError("Unsupported storage backend")
+
+        msg = f"✅ Restored {len(rows)} record(s). Use /topvouches to verify."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception as e:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"Restore failed: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Restore failed: {e}", ephemeral=True)
+        except Exception:
+            pass
+
 # === RUN THE BOT ===
 if __name__ == "__main__":
     if not TOKEN:
