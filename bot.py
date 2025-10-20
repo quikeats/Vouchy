@@ -25,6 +25,15 @@ PROVIDER_ROLE_NAME = "Provider"  # Only award points if a tagged member has this
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+# Optional: comma-separated guild ID(s) for fast per-guild slash command sync during updates
+GUILD_IDS_ENV = os.getenv("GUILD_IDS") or os.getenv("GUILD_ID") or os.getenv("TEST_GUILD_ID") or ""
+GUILD_IDS: list[int] = []
+for _gid in (x.strip() for x in GUILD_IDS_ENV.split(",") if x.strip()):
+    try:
+        GUILD_IDS.append(int(_gid))
+    except Exception:
+        pass
+
 
 # === BOT SETUP ===
 intents = discord.Intents.default()
@@ -326,11 +335,39 @@ async def on_ready():
         print(f"Legacy import skipped/failed: {e}")
     # Sync application (slash) commands
     try:
-        synced = await bot.tree.sync()
-        print(f"🔁 Synced {len(synced)} app command(s)")
+        if GUILD_IDS:
+            for gid in GUILD_IDS:
+                guild_obj = discord.Object(id=int(gid))
+                # Copy global commands to guild for instant updates
+                bot.tree.copy_global_to(guild=guild_obj)
+                synced = await bot.tree.sync(guild=guild_obj)
+                print(f"🔁 Synced {len(synced)} app command(s) to guild {gid}")
+        else:
+            synced = await bot.tree.sync()
+            print(f"🔁 Synced {len(synced)} global app command(s)")
     except Exception as e:
         print(f"App command sync failed: {e}")
 
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    try:
+        print(f"Slash command error: {error}")
+        if interaction.response.is_done():
+            await interaction.followup.send("An error occurred while executing this command.", ephemeral=True)
+        else:
+            await interaction.response.send_message("An error occurred while executing this command.", ephemeral=True)
+    except Exception:
+        pass
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    try:
+        print(f"Prefix command error: {error}")
+        await ctx.send("An error occurred while executing that command.")
+    except Exception:
+        pass
 
 @bot.event
 async def on_message(message: discord.Message):
