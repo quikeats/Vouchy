@@ -202,6 +202,13 @@ class JsonStorage:
         )
         return len(self._data)
 
+    async def clear_all(self) -> int:
+        """Delete all vouch data."""
+        count = len(self._data)
+        self._data = {}
+        self.data_path.write_text("{}", encoding="utf-8")
+        return count
+
 
 class PostgresStorage:
     def __init__(self, database_url: str) -> None:
@@ -326,6 +333,15 @@ class PostgresStorage:
                 await conn.execute("update vouches set points = 0")
             row = await conn.fetchrow("select count(*) as c from vouches")
             return int(row["c"]) if row else 0
+
+    async def clear_all(self) -> int:
+        """Delete all vouch rows."""
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("select count(*) as c from vouches")
+            count = int(row["c"]) if row else 0
+            await conn.execute("delete from vouches")
+        return count
 
 
 # Choose storage based on environment (DATABASE_URL => Postgres, else JSON)
@@ -476,10 +492,28 @@ async def slash_topvouches(interaction: discord.Interaction):
         pass
 
     try:
-        top_list = await storage.top(30)
+        top_list = await storage.top(50)  # pull more and then filter to present-only members
 
         lines: list[str] = []
-        for idx, (user_id, points) in enumerate(top_list, start=1):
+        present_only: list[tuple[int, int]] = []
+        # Filter to members currently in this guild
+        if interaction.guild is not None:
+            for user_id, points in top_list:
+                member = interaction.guild.get_member(int(user_id))
+                if member is None:
+                    try:
+                        member = await interaction.guild.fetch_member(int(user_id))
+                    except Exception:
+                        member = None
+                if member is not None:
+                    present_only.append((int(user_id), int(points)))
+        else:
+            present_only = top_list
+
+        # keep top 30 of present members
+        present_only = present_only[:30]
+
+        for idx, (user_id, points) in enumerate(present_only, start=1):
             # rank medal or numeric
             if idx == 1:
                 rank_str = "🥇"
@@ -496,7 +530,8 @@ async def slash_topvouches(interaction: discord.Interaction):
                     member = await interaction.guild.fetch_member(int(user_id))
                 except Exception:
                     member = None
-            display_name = member.display_name if member is not None else "(User Left Server)"
+            # At this point, only present members remain; just guard name
+            display_name = member.display_name if member is not None else str(user_id)
 
             name_max = 22
             name_show = _truncate_to_width(display_name, name_max)
@@ -732,6 +767,7 @@ async def slash_resetvouchpoints(interaction: discord.Interaction, reset_total_v
         msg = (
             f"✅ Reset points to 0 for {affected} user(s)."
             + (" Also reset total vouches." if reset_total_vouches else "")
+            + " Note: Leaderboard filters to current server members; re-run /topvouches."
         )
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
