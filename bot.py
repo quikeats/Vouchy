@@ -506,20 +506,78 @@ async def slash_topvouches(interaction: discord.Interaction):
             pass
 
 
-@bot.tree.command(name="addvouch", description="Add vouch points to a member (mods only).")
+@bot.tree.command(name="addvouch", description="Add vouch points to up to 5 members (mods only).")
 @app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(member="Member to add points to", amount="How many points to add")
-async def slash_addvouch(interaction: discord.Interaction, member: discord.Member, amount: int = 1):
+@app_commands.describe(
+    amount="How many points to add per member",
+    member1="Member #1 (required)",
+    member2="Member #2 (optional)",
+    member3="Member #3 (optional)",
+    member4="Member #4 (optional)",
+    member5="Member #5 (optional)",
+)
+async def slash_addvouch(
+    interaction: discord.Interaction,
+    amount: int = 1,
+    member1: discord.Member | None = None,
+    member2: discord.Member | None = None,
+    member3: discord.Member | None = None,
+    member4: discord.Member | None = None,
+    member5: discord.Member | None = None,
+):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
     if amount < 1:
-        await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
+        msg = "Amount must be at least 1."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
         return
-    if hasattr(storage, "add_vouch"):
-        new_total, new_vouches = await storage.add_vouch(int(member.id), amount, 1)
-        msg = f"✅ Added {amount} to {member.display_name}. Total: {new_total} • Vouches: {new_vouches}"
+
+    raw_targets = [member1, member2, member3, member4, member5]
+    targets: list[discord.Member] = [m for m in raw_targets if m is not None]
+    # If none provided via optional fields, error
+    if not targets:
+        help_msg = "Provide at least one member (member1)."
+        if interaction.response.is_done():
+            await interaction.followup.send(help_msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(help_msg, ephemeral=True)
+        return
+
+    # Deduplicate by ID to avoid double updates
+    unique_targets: list[discord.Member] = []
+    seen_ids: set[int] = set()
+    for m in targets:
+        if int(m.id) in seen_ids:
+            continue
+        seen_ids.add(int(m.id))
+        unique_targets.append(m)
+
+    lines: list[str] = []
+    success_count = 0
+    for m in unique_targets:
+        try:
+            if hasattr(storage, "add_vouch"):
+                new_total, new_vouches = await storage.add_vouch(int(m.id), amount, 1)
+                lines.append(f"✅ {m.display_name}: +{amount} → {new_total} • Vouches: {new_vouches}")
+            else:
+                new_total = await storage.add_points(int(m.id), amount)
+                lines.append(f"✅ {m.display_name}: +{amount} → {new_total}")
+            success_count += 1
+        except Exception as e:
+            lines.append(f"❌ {m.display_name}: {e}")
+
+    header = f"Added {amount} point(s) to {success_count}/{len(unique_targets)} member(s)."
+    body = "\n".join(lines)
+    out = header + ("\n" + body if body else "")
+    if interaction.response.is_done():
+        await interaction.followup.send(out, ephemeral=True)
     else:
-        new_total = await storage.add_points(int(member.id), amount)
-        msg = f"✅ Added {amount} to {member.display_name}. Total: {new_total}"
-    await interaction.response.send_message(msg)
+        await interaction.response.send_message(out, ephemeral=True)
 
 
 @bot.tree.command(name="removevouch", description="Remove vouch points from a member (mods only).")
