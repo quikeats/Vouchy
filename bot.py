@@ -189,6 +189,19 @@ class JsonStorage:
         )[:limit]
         return [(int(uid), int(obj.get("points", 0))) for uid, obj in items]
 
+    async def reset_points(self, reset_total_vouches: bool = False) -> int:
+        """Set points to 0 for all users. Optionally also reset total_vouches."""
+        if not self._data:
+            return 0
+        for uid, obj in self._data.items():
+            obj["points"] = 0
+            if reset_total_vouches:
+                obj["total_vouches"] = 0
+        self.data_path.write_text(
+            json.dumps(self._data, indent=4, ensure_ascii=False), encoding="utf-8"
+        )
+        return len(self._data)
+
 
 class PostgresStorage:
     def __init__(self, database_url: str) -> None:
@@ -302,6 +315,17 @@ class PostgresStorage:
                 int(limit),
             )
         return [(int(r["user_id"]), int(r["points"])) for r in rows]
+
+    async def reset_points(self, reset_total_vouches: bool = False) -> int:
+        """Set points to 0 for all users. Optionally also reset total_vouches."""
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            if reset_total_vouches:
+                await conn.execute("update vouches set points = 0, total_vouches = 0")
+            else:
+                await conn.execute("update vouches set points = 0")
+            row = await conn.fetchrow("select count(*) as c from vouches")
+            return int(row["c"]) if row else 0
 
 
 # Choose storage based on environment (DATABASE_URL => Postgres, else JSON)
@@ -677,6 +701,48 @@ async def slash_restorevouches(interaction: discord.Interaction, file: discord.A
                 await interaction.followup.send(f"Restore failed: {e}", ephemeral=True)
             else:
                 await interaction.response.send_message(f"Restore failed: {e}", ephemeral=True)
+        except Exception:
+            pass
+
+
+@bot.tree.command(name="resetvouchpoints", description="Admin: reset all vouch points to zero (optionally reset counts)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(reset_total_vouches="Also reset total vouches counters to zero")
+async def slash_resetvouchpoints(interaction: discord.Interaction, reset_total_vouches: bool = False):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
+    try:
+        # Perform reset
+        if hasattr(storage, "reset_points"):
+            affected = await storage.reset_points(reset_total_vouches=reset_total_vouches)  # type: ignore[arg-type]
+        else:
+            # Fallback: iterate known users (JSON mode only)
+            affected = 0
+            if isinstance(storage, JsonStorage):
+                for _uid in list(storage._data.keys()):
+                    storage._data[_uid]["points"] = 0
+                    if reset_total_vouches:
+                        storage._data[_uid]["total_vouches"] = 0
+                storage.data_path.write_text(
+                    json.dumps(storage._data, indent=4, ensure_ascii=False), encoding="utf-8"
+                )
+                affected = len(storage._data)
+        msg = (
+            f"✅ Reset points to 0 for {affected} user(s)."
+            + (" Also reset total vouches." if reset_total_vouches else "")
+        )
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception as e:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"Reset failed: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Reset failed: {e}", ephemeral=True)
         except Exception:
             pass
 
