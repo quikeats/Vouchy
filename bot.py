@@ -421,131 +421,12 @@ async def on_message(message: discord.Message):
                 await message.add_reaction("✅")
             except Exception:
                 pass
+            # reaction already attempted above; don't duplicate
 
     await bot.process_commands(message)
 
 
-# === COMMANDS ===
-@bot.command(name="vouches")
-async def vouches_cmd(ctx: commands.Context, member: discord.Member | None = None):
-    """Check your or someone else's vouch points."""
-    member = member or ctx.author
-    if hasattr(storage, "get_stats"):
-        points, total_vouches = await storage.get_stats(int(member.id))
-    else:
-        points = await storage.get_points(int(member.id))
-        total_vouches = 0
-    await ctx.send(
-        f"⭐ {member.display_name} has {points} point(s) • {total_vouches} total vouch(es)."
-    )
-
-
-@bot.command()
-async def topvouches(ctx: commands.Context):
-    """Show the top 30 users with the most vouch points."""
-    top_list = await storage.top(30)
-
-    # Build pretty, aligned leaderboard lines
-    lines: list[str] = []
-    for idx, (user_id, points) in enumerate(top_list, start=1):
-        # Medal/rank
-        if idx == 1:
-            rank_str = "🥇"
-        elif idx == 2:
-            rank_str = "🥈"
-        elif idx == 3:
-            rank_str = "🥉"
-        else:
-            rank_str = f"#{idx:>2}"
-
-        # Resolve display name
-        if ctx.guild is not None:
-            member = ctx.guild.get_member(int(user_id))
-            if member is None:
-                try:
-                    member = await ctx.guild.fetch_member(int(user_id))
-                except Exception:
-                    member = None
-            display_name = member.display_name if member is not None else "(User Left Server)"
-        else:
-            display_name = str(user_id)
-
-        # Truncate name for alignment
-        name_max = 22
-        name_show = _truncate_to_width(display_name, name_max)
-        points_show = f"{int(points):,}"
-        line = f"{rank_str}  " + _pad_to_width_right(name_show, name_max) + "  " + _pad_to_width_left(points_show, 8)
-        lines.append(line)
-
-    header = f"RANK  " + _pad_to_width_right("USER", 22) + "  " + _pad_to_width_left("POINTS", 8)
-    desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
-
-    embed = discord.Embed(
-        title="🏆 Top Vouch Leaderboard",
-        description=desc,
-        color=discord.Color.gold(),
-    )
-    if ctx.guild and ctx.guild.icon:
-        embed.set_thumbnail(url=ctx.guild.icon.url)
-    embed.set_footer(text=f"{ctx.guild.name if ctx.guild else 'Vouchy'} • Points leaderboard")
-    embed.timestamp = datetime.now(timezone.utc)
-
-    await ctx.send(embed=embed)
-
-
-@bot.command()
-@commands.has_permissions(manage_guild=True)
-async def addvouch(ctx: commands.Context, member: discord.Member, amount: int = 1):
-    """Add vouch points to a member (mods only)."""
-    if amount < 1:
-        await ctx.send("Amount must be at least 1.")
-        return
-    if hasattr(storage, "add_vouch"):
-        new_total, new_vouches = await storage.add_vouch(int(member.id), amount, 1)
-        await ctx.send(
-            f"✅ Added {amount} to {member.display_name}. Total: {new_total} • Vouches: {new_vouches}"
-        )
-    else:
-        new_total = await storage.add_points(int(member.id), amount)
-        await ctx.send(f"✅ Added {amount} to {member.display_name}. Total: {new_total}")
-
-
-@bot.command()
-@commands.has_permissions(manage_guild=True)
-async def removevouch(ctx: commands.Context, member: discord.Member, amount: int = 1):
-    """Remove vouch points from a member (mods only)."""
-    if amount < 1:
-        await ctx.send("Amount must be at least 1.")
-        return
-    new_total = await storage.add_points(int(member.id), -amount)
-    if hasattr(storage, "get_stats"):
-        _p, vouches = await storage.get_stats(int(member.id))
-        await ctx.send(
-            f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total} • Vouches: {vouches}"
-        )
-    else:
-        await ctx.send(f"🗑️ Removed {amount} from {member.display_name}. Total: {new_total}")
-
-
-@bot.command(name="importvouches")
-@commands.has_permissions(administrator=True)
-async def importvouches_cmd(ctx: commands.Context):
-    """Admin: import vouches from local vouches.json into Postgres/JSON storage."""
-    try:
-        if isinstance(storage, PostgresStorage):
-            legacy_rows = _load_legacy_json_for_import()
-            if not legacy_rows:
-                await ctx.send("No local vouches.json data found to import.")
-                return
-            await storage.bulk_upsert(legacy_rows)
-            await ctx.send(f"📥 Imported {len(legacy_rows)} record(s) into Postgres.")
-        elif isinstance(storage, JsonStorage):
-            # JsonStorage already reads/writes the same file; treat as no-op
-            await ctx.send("Running in JSON mode — data already in vouches.json.")
-        else:
-            await ctx.send("Unsupported storage backend for import.")
-    except Exception as e:
-        await ctx.send(f"Import failed: {e}")
+# Commands removed to avoid duplicates; prefer slash commands below
 
 
 # === SLASH COMMANDS ===
@@ -575,6 +456,7 @@ async def slash_topvouches(interaction: discord.Interaction):
 
         lines: list[str] = []
         for idx, (user_id, points) in enumerate(top_list, start=1):
+            # rank medal or numeric
             if idx == 1:
                 rank_str = "🥇"
             elif idx == 2:
@@ -598,17 +480,16 @@ async def slash_topvouches(interaction: discord.Interaction):
             line = f"{rank_str}  " + _pad_to_width_right(name_show, name_max) + "  " + _pad_to_width_left(points_show, 8)
             lines.append(line)
 
+        # Build a cleaner, modern embed
         header = f"RANK  " + _pad_to_width_right("USER", 22) + "  " + _pad_to_width_left("POINTS", 8)
-        desc = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
+        desc_block = "```\n" + header + "\n" + "\n".join(lines) + "\n```"
 
-        embed = discord.Embed(
-            title="🏆 Top Vouch Leaderboard",
-            description=desc,
-            color=discord.Color.gold(),
-        )
+        embed = discord.Embed(title="🏆 Top Vouch Leaderboard", color=discord.Color.gold())
+        embed.description = desc_block
         if interaction.guild and interaction.guild.icon:
             embed.set_thumbnail(url=interaction.guild.icon.url)
-        embed.set_footer(text=f"{interaction.guild.name if interaction.guild else 'Vouchy'} • Points leaderboard")
+        embed.set_author(name=interaction.guild.name if interaction.guild else "Vouchy")
+        embed.set_footer(text="Points leaderboard • Updated just now")
         embed.timestamp = datetime.now(timezone.utc)
 
         if interaction.response.is_done():
